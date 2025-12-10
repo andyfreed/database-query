@@ -276,9 +276,16 @@ class DBQ_OpenAI_Client {
         $prompt .= "JOIN {$wpdb->usermeta} um1 ON u.ID = um1.user_id AND um1.meta_key = 'first_name' ";
         $prompt .= "JOIN {$wpdb->usermeta} um2 ON u.ID = um2.user_id AND um2.meta_key = 'last_name';\n\n";
         
-        $prompt .= "To filter by a meta_key value (e.g., IAR_license = 'checked'):\n";
+        $prompt .= "To filter by a meta_key value (e.g., IAR_license = 'checked' or '1' or 'yes'):\n";
         $prompt .= "JOIN {$wpdb->usermeta} um3 ON u.ID = um3.user_id ";
-        $prompt .= "WHERE um3.meta_key = 'IAR_license' AND um3.meta_value = 'checked';\n\n";
+        $prompt .= "WHERE um3.meta_key = 'IAR_license' AND (um3.meta_value = 'checked' OR um3.meta_value = '1' OR um3.meta_value = 'yes');\n\n";
+        
+        $prompt .= "IMPORTANT: When searching for metadata fields:\n";
+        $prompt .= "- ALWAYS check the USERMETA META_KEYS list above to find the EXACT field name\n";
+        $prompt .= "- Field names are case-sensitive and may vary (e.g., 'IAR_license', 'iar_license', 'IAR license', 'license_IAR')\n";
+        $prompt .= "- Values may be stored as '1', 'yes', 'true', 'checked', 'on', or other formats\n";
+        $prompt .= "- If the field name isn't obvious, search in the meta_keys list for variations or use LIKE queries\n";
+        $prompt .= "- When filtering by checkbox values, try: meta_value IN ('1', 'yes', 'true', 'checked', 'on')\n\n";
         
         $prompt .= "CRITICAL: Only SELECT queries. Return ONLY SQL, no explanations.";
         
