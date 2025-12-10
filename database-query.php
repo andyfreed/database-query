@@ -158,7 +158,8 @@ class Database_Query_AI {
         wp_send_json_success(array(
             'response' => $formatted_response,
             'sql_query' => $sql_query,
-            'raw_data' => $result
+            'raw_data' => $result,
+            'csv_data' => $this->generate_csv($result)
         ));
     }
     
@@ -180,7 +181,40 @@ class Database_Query_AI {
         
         wp_send_json_success(array('schema' => $schema));
     }
+    
+    /**
+     * Generate CSV data from query results
+     * 
+     * @param array $data Query results
+     * @return string CSV data
+     */
+    private function generate_csv($data) {
+        if (empty($data) || !is_array($data)) {
+            return '';
+        }
+        
+        // Get headers from first row
+        $headers = array_keys($data[0]);
+        
+        // Start output buffering
+        ob_start();
+        
+        // Output headers
+        $output = fopen('php://output', 'w');
+        fputcsv($output, $headers);
+        
+        // Output data rows
+        foreach ($data as $row) {
+            fputcsv($output, $row);
+        }
+        
+        fclose($output);
+        $csv = ob_get_clean();
+        
+        return base64_encode($csv);
+    }
 }
 
 // Initialize the plugin
 Database_Query_AI::get_instance();
+

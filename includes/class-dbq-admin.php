@@ -172,6 +172,11 @@ class DBQ_Admin {
                     <strong><?php _e('SQL Query:', 'database-query'); ?></strong>
                     <pre id="dbq-sql-display"></pre>
                 </div>
+                <div class="dbq-export-actions" style="margin-top: 15px;">
+                    <button type="button" id="dbq-download-csv" class="button">
+                        <?php _e('Download as CSV/Excel', 'database-query'); ?>
+                    </button>
+                </div>
             </div>
         </div>
         <?php

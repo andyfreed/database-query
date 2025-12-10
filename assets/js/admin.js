@@ -64,6 +64,13 @@
                         if (response.data.sql_query) {
                             $sqlDisplay.text(response.data.sql_query);
                             $queryDetails.show();
+                            
+                            // Store CSV data for download
+                            if (response.data.csv_data) {
+                                $('#dbq-download-csv').data('csv', response.data.csv_data).show();
+                            } else {
+                                $('#dbq-download-csv').hide();
+                            }
                         }
                         
                         // Update conversation history
@@ -161,5 +168,28 @@
         
         // Focus input on load
         $chatInput.focus();
+        
+        // Handle CSV download
+        $(document).on('click', '#dbq-download-csv', function() {
+            const csvData = $(this).data('csv');
+            if (!csvData) {
+                return;
+            }
+            
+            // Decode base64 CSV data
+            const csvContent = atob(csvData);
+            
+            // Create blob and download
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'database-query-results-' + new Date().getTime() + '.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
     });
 })(jQuery);
