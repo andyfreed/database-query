@@ -91,11 +91,12 @@ class DBQ_OpenAI_Client {
      * @param string $user_query Natural language query
      * @param array $schema Database schema
      * @param array $conversation_history Previous conversation messages
+     * @param array $discovery_data Discovery data (discovered_keys, value_samples, search_terms)
      * @return string|WP_Error SQL query or error
      */
-    public function generate_sql_query($user_query, $schema, $conversation_history = array()) {
-        // Build system prompt
-        $system_prompt = $this->build_sql_generation_prompt($schema);
+    public function generate_sql_query($user_query, $schema, $conversation_history = array(), $discovery_data = array()) {
+        // Build system prompt with discovery data
+        $system_prompt = $this->build_sql_generation_prompt($schema, $discovery_data);
         
         // Build messages
         $messages = array(
@@ -177,6 +178,15 @@ class DBQ_OpenAI_Client {
         $user_message = "The user asked: '{$original_query}'\n\n";
         $user_message .= "SQL query executed: {$sql_query}\n\n";
         $user_message .= "Results: " . json_encode($results_summary, JSON_PRETTY_PRINT) . "\n\n";
+        
+        // If no results, be more helpful
+        if (empty($query_results) || (is_array($query_results) && count($query_results) === 0)) {
+            $user_message .= "NOTE: The query returned 0 results. Suggest checking:\n";
+            $user_message .= "1. If the field names match exactly (case-sensitive)\n";
+            $user_message .= "2. If the values are stored in the expected format\n";
+            $user_message .= "3. If there are actually any records matching the criteria\n\n";
+        }
+        
         $user_message .= "Format this into a clear, natural language response for the user.";
         
         $messages[] = array(
@@ -188,106 +198,161 @@ class DBQ_OpenAI_Client {
     }
     
     /**
+     * Generate corrected SQL query based on debug information
+     * 
+     * @param string $debug_prompt Debug information and correction request
+     * @param array $schema Database schema
+     * @param array $conversation_history Previous conversation messages
+     * @param array $discovery_data Discovery data
+     * @return string|WP_Error Corrected SQL query or error
+     */
+    public function generate_corrected_query($debug_prompt, $schema, $conversation_history = array(), $discovery_data = array()) {
+        // Build system prompt with discovery data
+        $system_prompt = $this->build_sql_generation_prompt($schema, $discovery_data);
+        
+        // Build messages
+        $messages = array(
+            array(
+                'role' => 'system',
+                'content' => $system_prompt . "\n\nIMPORTANT: A previous query returned 0 results. Use the debug information to generate a corrected query."
+            )
+        );
+        
+        // Add conversation history
+        foreach ($conversation_history as $msg) {
+            if (isset($msg['role']) && isset($msg['content'])) {
+                $messages[] = array(
+                    'role' => $msg['role'],
+                    'content' => $msg['content']
+                );
+            }
+        }
+        
+        // Add debug prompt
+        $messages[] = array(
+            'role' => 'user',
+            'content' => $debug_prompt . "\n\nGenerate the corrected SQL query. Return ONLY the SQL query, no explanations."
+        );
+        
+        $response = $this->make_request($messages);
+        
+        if (is_wp_error($response)) {
+            return $response;
+        }
+        
+        // Clean up the response
+        $sql = trim($response);
+        $sql = preg_replace('/^```sql\s*/i', '', $sql);
+        $sql = preg_replace('/^```\s*/', '', $sql);
+        $sql = preg_replace('/\s*```$/', '', $sql);
+        $sql = trim($sql);
+        
+        return $sql;
+    }
+    
+    /**
      * Build SQL generation system prompt
      * 
      * @param array $schema Database schema
+     * @param array $discovery_data Discovery data (discovered_keys, value_samples, search_terms)
      * @return string System prompt
      */
-    private function build_sql_generation_prompt($schema) {
+    private function build_sql_generation_prompt($schema, $discovery_data = array()) {
         global $wpdb;
         $prefix = $wpdb->prefix;
         
-        // Get meta keys from usermeta and postmeta
-        $analyzer = new DBQ_Database_Analyzer();
-        $usermeta_keys = $analyzer->get_usermeta_keys();
-        $postmeta_keys = $analyzer->get_postmeta_keys();
+        $prompt = "You are a WordPress database expert. Generate ONLY SELECT queries. Table prefix: {$prefix}\n\n";
         
-        $prompt = "You are a SQL query generator for WordPress. Generate ONLY SELECT queries. Table prefix: {$prefix}\n\n";
-        
-        // Add ALL tables with ALL columns - this is crucial for the AI to understand the full structure
-        $prompt .= "COMPLETE DATABASE STRUCTURE:\n\n";
-        
-        foreach ($schema['tables'] as $table_name => $table_info) {
-            $prompt .= "TABLE: {$table_name} ({$table_info['row_count']} rows)\n";
-            if ($table_info['primary_key']) {
-                $prompt .= "Primary Key: {$table_info['primary_key']}\n";
-            }
-            $prompt .= "Columns: ";
-            $column_list = array();
-            foreach ($table_info['columns'] as $column) {
-                $col_desc = "{$column['name']} ({$column['type']}";
-                if ($column['null'] === 'NO') {
-                    $col_desc .= ", NOT NULL";
+        // Add core table structures (essential tables only to save tokens)
+        $prompt .= "CORE TABLE STRUCTURES:\n\n";
+        $core_tables = array($wpdb->users, $wpdb->usermeta, $wpdb->posts, $wpdb->postmeta);
+        foreach ($core_tables as $table_name) {
+            if (isset($schema['tables'][$table_name])) {
+                $table_info = $schema['tables'][$table_name];
+                $prompt .= "TABLE: {$table_name} ({$table_info['row_count']} rows)\n";
+                if ($table_info['primary_key']) {
+                    $prompt .= "PK: {$table_info['primary_key']}\n";
                 }
-                if ($column['key'] === 'PRI') {
-                    $col_desc .= ", PRIMARY KEY";
-                } elseif ($column['key'] === 'MUL') {
-                    $col_desc .= ", INDEXED";
-                }
-                $col_desc .= ")";
-                $column_list[] = $col_desc;
+                $col_names = array_map(function($c) { return $c['name']; }, $table_info['columns']);
+                $prompt .= "Columns: " . implode(', ', $col_names) . "\n\n";
             }
-            $prompt .= implode(", ", $column_list) . "\n\n";
         }
         
-        // Add all meta keys from usermeta - this is critical for finding license fields, etc.
-        if (!empty($usermeta_keys)) {
-            $prompt .= "USERMETA META_KEYS (all available user metadata fields - use these exact names in queries):\n";
-            // Show all meta_keys, but in a compact format
-            // If too many, show first 200 most common ones
-            $keys_to_show = count($usermeta_keys) > 200 ? array_slice($usermeta_keys, 0, 200) : $usermeta_keys;
-            $prompt .= implode(', ', $keys_to_show);
-            if (count($usermeta_keys) > 200) {
-                $prompt .= "\n... and " . (count($usermeta_keys) - 200) . " more (total: " . count($usermeta_keys) . " unique keys)";
+        // Add discovered meta keys with value samples (THIS IS THE KEY PART!)
+        if (!empty($discovery_data['discovered_keys'])) {
+            $discovered = $discovery_data['discovered_keys'];
+            
+            if (!empty($discovered['usermeta'])) {
+                $prompt .= "DISCOVERED USERMETA FIELDS (found by searching for: " . implode(', ', $discovery_data['search_terms'] ?? array()) . "):\n";
+                foreach ($discovered['usermeta'] as $key_info) {
+                    $meta_key = $key_info['meta_key'];
+                    $prompt .= "- {$meta_key} ({$key_info['count']} rows)";
+                    
+                    // Add actual value samples if available
+                    if (isset($discovery_data['value_samples']['usermeta'][$meta_key])) {
+                        $value_info = $discovery_data['value_samples']['usermeta'][$meta_key];
+                        $prompt .= "\n  Values: ";
+                        $value_list = array();
+                        foreach (array_slice($value_info['value_samples'], 0, 10) as $sample) {
+                            $value_list[] = "'{$sample['value']}' (x{$sample['count']})";
+                        }
+                        $prompt .= implode(', ', $value_list);
+                        
+                        // Highlight checkbox patterns
+                        if (!empty($value_info['patterns']['checkbox_checked'])) {
+                            $prompt .= " [CHECKBOX: checked = " . implode(' OR ', $value_info['patterns']['checkbox_checked']) . "]";
+                        }
+                    }
+                    $prompt .= "\n";
+                }
+                $prompt .= "\n";
             }
-            $prompt .= "\n\n";
+            
+            if (!empty($discovered['postmeta'])) {
+                $prompt .= "DISCOVERED POSTMETA FIELDS:\n";
+                foreach (array_slice($discovered['postmeta'], 0, 10) as $key_info) {
+                    $meta_key = $key_info['meta_key'];
+                    $prompt .= "- {$meta_key} ({$key_info['count']} rows)";
+                    if (isset($discovery_data['value_samples']['postmeta'][$meta_key])) {
+                        $value_info = $discovery_data['value_samples']['postmeta'][$meta_key];
+                        $sample_values = array_slice($value_info['value_samples'], 0, 5);
+                        $prompt .= " Values: " . implode(', ', array_map(function($v) { return "'{$v['value']}'"; }, $sample_values));
+                    }
+                    $prompt .= "\n";
+                }
+                $prompt .= "\n";
+            }
         }
         
-        // Add all meta keys from postmeta
-        if (!empty($postmeta_keys)) {
-            $prompt .= "POSTMETA META_KEYS (available post metadata fields):\n";
-            $keys_to_show = count($postmeta_keys) > 200 ? array_slice($postmeta_keys, 0, 200) : $postmeta_keys;
-            $prompt .= implode(', ', $keys_to_show);
-            if (count($postmeta_keys) > 200) {
-                $prompt .= "\n... and " . (count($postmeta_keys) - 200) . " more (total: " . count($postmeta_keys) . " unique keys)";
+        // If no discovery data, fall back to showing all meta keys (but limited)
+        if (empty($discovery_data['discovered_keys'])) {
+            $analyzer = new DBQ_Database_Analyzer();
+            $usermeta_keys = $analyzer->get_usermeta_keys();
+            if (!empty($usermeta_keys)) {
+                $prompt .= "SAMPLE USERMETA META_KEYS (showing first 100):\n";
+                $prompt .= implode(', ', array_slice($usermeta_keys, 0, 100));
+                if (count($usermeta_keys) > 100) {
+                    $prompt .= " ... (total: " . count($usermeta_keys) . " keys)";
+                }
+                $prompt .= "\n\n";
             }
-            $prompt .= "\n\n";
         }
         
         // Add relationships
         $prompt .= "TABLE RELATIONSHIPS:\n";
         $prompt .= "- {$wpdb->usermeta}.user_id -> {$wpdb->users}.ID\n";
         $prompt .= "- {$wpdb->posts}.post_author -> {$wpdb->users}.ID\n";
-        $prompt .= "- {$wpdb->postmeta}.post_id -> {$wpdb->posts}.ID\n";
-        if (!empty($schema['table_relationships'])) {
-            foreach ($schema['table_relationships'] as $rel) {
-                if (strpos($rel['from_table'], $prefix) === 0) {
-                    $prompt .= "- {$rel['from_table']}.{$rel['from_column']} -> {$rel['to_table']}.{$rel['to_column']}\n";
-                }
-            }
-        }
-        $prompt .= "\n";
+        $prompt .= "- {$wpdb->postmeta}.post_id -> {$wpdb->posts}.ID\n\n";
         
-        // Important examples
-        $prompt .= "EXAMPLES:\n";
-        $prompt .= "To get user email and first_name/last_name from usermeta:\n";
-        $prompt .= "SELECT u.user_email, um1.meta_value AS first_name, um2.meta_value AS last_name ";
-        $prompt .= "FROM {$wpdb->users} u ";
-        $prompt .= "JOIN {$wpdb->usermeta} um1 ON u.ID = um1.user_id AND um1.meta_key = 'first_name' ";
-        $prompt .= "JOIN {$wpdb->usermeta} um2 ON u.ID = um2.user_id AND um2.meta_key = 'last_name';\n\n";
+        // Critical instructions
+        $prompt .= "CRITICAL INSTRUCTIONS:\n";
+        $prompt .= "1. Use the EXACT meta_key names from the DISCOVERED fields above\n";
+        $prompt .= "2. Use the EXACT values shown in the value samples (e.g., if checkbox shows 'on', use 'on' not '1')\n";
+        $prompt .= "3. For checkboxes, look for the [CHECKBOX: checked = ...] pattern to see what value means 'checked'\n";
+        $prompt .= "4. To join multiple meta_keys, create separate JOINs for each (um1, um2, um3, etc.)\n";
+        $prompt .= "5. Example: JOIN {$wpdb->usermeta} um1 ON u.ID = um1.user_id AND um1.meta_key = 'first_name'\n\n";
         
-        $prompt .= "To filter by a meta_key value (e.g., IAR_license = 'checked' or '1' or 'yes'):\n";
-        $prompt .= "JOIN {$wpdb->usermeta} um3 ON u.ID = um3.user_id ";
-        $prompt .= "WHERE um3.meta_key = 'IAR_license' AND (um3.meta_value = 'checked' OR um3.meta_value = '1' OR um3.meta_value = 'yes');\n\n";
-        
-        $prompt .= "IMPORTANT: When searching for metadata fields:\n";
-        $prompt .= "- ALWAYS check the USERMETA META_KEYS list above to find the EXACT field name\n";
-        $prompt .= "- Field names are case-sensitive and may vary (e.g., 'IAR_license', 'iar_license', 'IAR license', 'license_IAR')\n";
-        $prompt .= "- Values may be stored as '1', 'yes', 'true', 'checked', 'on', or other formats\n";
-        $prompt .= "- If the field name isn't obvious, search in the meta_keys list for variations or use LIKE queries\n";
-        $prompt .= "- When filtering by checkbox values, try: meta_value IN ('1', 'yes', 'true', 'checked', 'on')\n\n";
-        
-        $prompt .= "CRITICAL: Only SELECT queries. Return ONLY SQL, no explanations.";
+        $prompt .= "Return ONLY the SQL query, no explanations, no markdown formatting.";
         
         return $prompt;
     }
