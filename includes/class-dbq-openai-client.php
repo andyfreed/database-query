@@ -197,88 +197,70 @@ class DBQ_OpenAI_Client {
         global $wpdb;
         $prefix = $wpdb->prefix;
         
+        // Get meta keys from usermeta and postmeta
+        $analyzer = new DBQ_Database_Analyzer();
+        $usermeta_keys = $analyzer->get_usermeta_keys();
+        $postmeta_keys = $analyzer->get_postmeta_keys();
+        
         $prompt = "You are a SQL query generator for WordPress. Generate ONLY SELECT queries. Table prefix: {$prefix}\n\n";
         
-        // Key tables with essential columns only
-        $key_tables = array(
-            $wpdb->users => array(
-                'ID' => 'primary key',
-                'user_login' => 'username',
-                'user_email' => 'email address',
-                'user_nicename' => 'display name',
-                'display_name' => 'display name',
-                'user_registered' => 'registration date'
-            ),
-            $wpdb->usermeta => array(
-                'umeta_id' => 'primary key',
-                'user_id' => 'foreign key to users.ID',
-                'meta_key' => 'metadata key (e.g., first_name, last_name, license fields)',
-                'meta_value' => 'metadata value'
-            ),
-            $wpdb->posts => array(
-                'ID' => 'primary key',
-                'post_author' => 'foreign key to users.ID',
-                'post_title' => 'title',
-                'post_type' => 'post type (e.g., shop_order, product)',
-                'post_status' => 'status',
-                'post_date' => 'date'
-            ),
-            $wpdb->postmeta => array(
-                'meta_id' => 'primary key',
-                'post_id' => 'foreign key to posts.ID',
-                'meta_key' => 'metadata key',
-                'meta_value' => 'metadata value'
-            )
-        );
+        // Add ALL tables with ALL columns - this is crucial for the AI to understand the full structure
+        $prompt .= "COMPLETE DATABASE STRUCTURE:\n\n";
         
-        // Add key table info
-        $prompt .= "KEY TABLES:\n";
-        foreach ($key_tables as $table_name => $columns) {
-            if (isset($schema['tables'][$table_name])) {
-                $table_info = $schema['tables'][$table_name];
-                $prompt .= "{$table_name}: {$table_info['row_count']} rows. ";
-                $prompt .= "Key columns: " . implode(', ', array_keys($columns)) . "\n";
-                foreach ($columns as $col => $desc) {
-                    $prompt .= "  - {$col}: {$desc}\n";
-                }
-                $prompt .= "\n";
+        foreach ($schema['tables'] as $table_name => $table_info) {
+            $prompt .= "TABLE: {$table_name} ({$table_info['row_count']} rows)\n";
+            if ($table_info['primary_key']) {
+                $prompt .= "Primary Key: {$table_info['primary_key']}\n";
             }
+            $prompt .= "Columns: ";
+            $column_list = array();
+            foreach ($table_info['columns'] as $column) {
+                $col_desc = "{$column['name']} ({$column['type']}";
+                if ($column['null'] === 'NO') {
+                    $col_desc .= ", NOT NULL";
+                }
+                if ($column['key'] === 'PRI') {
+                    $col_desc .= ", PRIMARY KEY";
+                } elseif ($column['key'] === 'MUL') {
+                    $col_desc .= ", INDEXED";
+                }
+                $col_desc .= ")";
+                $column_list[] = $col_desc;
+            }
+            $prompt .= implode(", ", $column_list) . "\n\n";
         }
         
-        // Add important custom tables (limit to 10 most relevant)
-        $custom_count = 0;
-        if (!empty($schema['custom_tables'])) {
-            $prompt .= "CUSTOM TABLES:\n";
-            foreach (array_slice($schema['custom_tables'], 0, 10) as $table_name) {
-                if (isset($schema['tables'][$table_name])) {
-                    $table_info = $schema['tables'][$table_name];
-                    $prompt .= "{$table_name} ({$table_info['row_count']} rows)";
-                    if ($table_info['primary_key']) {
-                        $prompt .= " PK: {$table_info['primary_key']}";
-                    }
-                    // Only show first 5 columns
-                    $cols = array_slice($table_info['columns'], 0, 5);
-                    $col_names = array_map(function($c) { return $c['name']; }, $cols);
-                    $prompt .= " Columns: " . implode(', ', $col_names);
-                    if (count($table_info['columns']) > 5) {
-                        $prompt .= ", ...";
-                    }
-                    $prompt .= "\n";
-                    $custom_count++;
-                    if ($custom_count >= 10) break;
-                }
+        // Add all meta keys from usermeta - this is critical for finding license fields, etc.
+        if (!empty($usermeta_keys)) {
+            $prompt .= "USERMETA META_KEYS (all available user metadata fields - use these exact names in queries):\n";
+            // Show all meta_keys, but in a compact format
+            // If too many, show first 200 most common ones
+            $keys_to_show = count($usermeta_keys) > 200 ? array_slice($usermeta_keys, 0, 200) : $usermeta_keys;
+            $prompt .= implode(', ', $keys_to_show);
+            if (count($usermeta_keys) > 200) {
+                $prompt .= "\n... and " . (count($usermeta_keys) - 200) . " more (total: " . count($usermeta_keys) . " unique keys)";
             }
-            $prompt .= "\n";
+            $prompt .= "\n\n";
         }
         
-        // Key relationships only
-        $prompt .= "KEY RELATIONSHIPS:\n";
+        // Add all meta keys from postmeta
+        if (!empty($postmeta_keys)) {
+            $prompt .= "POSTMETA META_KEYS (available post metadata fields):\n";
+            $keys_to_show = count($postmeta_keys) > 200 ? array_slice($postmeta_keys, 0, 200) : $postmeta_keys;
+            $prompt .= implode(', ', $keys_to_show);
+            if (count($postmeta_keys) > 200) {
+                $prompt .= "\n... and " . (count($postmeta_keys) - 200) . " more (total: " . count($postmeta_keys) . " unique keys)";
+            }
+            $prompt .= "\n\n";
+        }
+        
+        // Add relationships
+        $prompt .= "TABLE RELATIONSHIPS:\n";
         $prompt .= "- {$wpdb->usermeta}.user_id -> {$wpdb->users}.ID\n";
         $prompt .= "- {$wpdb->posts}.post_author -> {$wpdb->users}.ID\n";
         $prompt .= "- {$wpdb->postmeta}.post_id -> {$wpdb->posts}.ID\n";
         if (!empty($schema['table_relationships'])) {
-            // Limit to first 10 relationships
-            foreach (array_slice($schema['table_relationships'], 0, 10) as $rel) {
+            foreach ($schema['table_relationships'] as $rel) {
                 if (strpos($rel['from_table'], $prefix) === 0) {
                     $prompt .= "- {$rel['from_table']}.{$rel['from_column']} -> {$rel['to_table']}.{$rel['to_column']}\n";
                 }
@@ -286,11 +268,17 @@ class DBQ_OpenAI_Client {
         }
         $prompt .= "\n";
         
-        // Important note about usermeta
-        $prompt .= "NOTE: User metadata is stored in {$wpdb->usermeta} with meta_key and meta_value. ";
-        $prompt .= "To query user metadata, join {$wpdb->users} with {$wpdb->usermeta} WHERE user_id matches.\n";
-        $prompt .= "Example: SELECT u.*, um.meta_value FROM {$wpdb->users} u ";
-        $prompt .= "JOIN {$wpdb->usermeta} um ON u.ID = um.user_id WHERE um.meta_key = 'first_name';\n\n";
+        // Important examples
+        $prompt .= "EXAMPLES:\n";
+        $prompt .= "To get user email and first_name/last_name from usermeta:\n";
+        $prompt .= "SELECT u.user_email, um1.meta_value AS first_name, um2.meta_value AS last_name ";
+        $prompt .= "FROM {$wpdb->users} u ";
+        $prompt .= "JOIN {$wpdb->usermeta} um1 ON u.ID = um1.user_id AND um1.meta_key = 'first_name' ";
+        $prompt .= "JOIN {$wpdb->usermeta} um2 ON u.ID = um2.user_id AND um2.meta_key = 'last_name';\n\n";
+        
+        $prompt .= "To filter by a meta_key value (e.g., IAR_license = 'checked'):\n";
+        $prompt .= "JOIN {$wpdb->usermeta} um3 ON u.ID = um3.user_id ";
+        $prompt .= "WHERE um3.meta_key = 'IAR_license' AND um3.meta_value = 'checked';\n\n";
         
         $prompt .= "CRITICAL: Only SELECT queries. Return ONLY SQL, no explanations.";
         
