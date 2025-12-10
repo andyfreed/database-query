@@ -320,4 +320,38 @@ class DBQ_Database_Analyzer {
         
         return $summary;
     }
+    
+    /**
+     * Get all unique meta keys from usermeta table
+     * 
+     * @return array Array of unique meta keys
+     */
+    public function get_usermeta_keys() {
+        $query = "SELECT DISTINCT meta_key FROM {$this->wpdb->usermeta} WHERE meta_key != '' ORDER BY meta_key";
+        $results = $this->wpdb->get_col($query);
+        return $results ? $results : array();
+    }
+    
+    /**
+     * Get all unique meta keys from postmeta table
+     * 
+     * @return array Array of unique meta keys
+     */
+    public function get_postmeta_keys() {
+        $query = "SELECT DISTINCT meta_key FROM {$this->wpdb->postmeta} WHERE meta_key != '' ORDER BY meta_key";
+        $results = $this->wpdb->get_col($query);
+        return $results ? $results : array();
+    }
+    
+    /**
+     * Get all column names for a table
+     * 
+     * @param string $table_name Table name
+     * @return array Array of column names
+     */
+    public function get_table_columns($table_name) {
+        $columns = $this->wpdb->get_col("DESCRIBE `{$table_name}`");
+        return $columns ? $columns : array();
+    }
 }
+
