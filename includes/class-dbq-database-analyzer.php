@@ -353,5 +353,196 @@ class DBQ_Database_Analyzer {
         $columns = $this->wpdb->get_col("DESCRIBE `{$table_name}`");
         return $columns ? $columns : array();
     }
+    
+    /**
+     * Discover meta keys related to search terms
+     * 
+     * @param array $search_terms Array of search terms
+     * @return array Discovered meta keys with counts
+     */
+    public function discover_meta_keys($search_terms) {
+        $discovered = array(
+            'usermeta' => array(),
+            'postmeta' => array()
+        );
+        
+        foreach ($search_terms as $term) {
+            // Search usermeta
+            $user_query = $this->wpdb->prepare(
+                "SELECT DISTINCT meta_key, COUNT(*) as count 
+                 FROM {$this->wpdb->usermeta} 
+                 WHERE meta_key != '' AND meta_key LIKE %s 
+                 GROUP BY meta_key 
+                 ORDER BY count DESC 
+                 LIMIT 20",
+                '%' . $this->wpdb->esc_like($term) . '%'
+            );
+            $user_results = $this->wpdb->get_results($user_query, ARRAY_A);
+            
+            if ($user_results) {
+                foreach ($user_results as $row) {
+                    $key = $row['meta_key'];
+                    if (!isset($discovered['usermeta'][$key])) {
+                        $discovered['usermeta'][$key] = array(
+                            'meta_key' => $key,
+                            'count' => (int) $row['count'],
+                            'search_term' => $term
+                        );
+                    }
+                }
+            }
+            
+            // Search postmeta
+            $post_query = $this->wpdb->prepare(
+                "SELECT DISTINCT meta_key, COUNT(*) as count 
+                 FROM {$this->wpdb->postmeta} 
+                 WHERE meta_key != '' AND meta_key LIKE %s 
+                 GROUP BY meta_key 
+                 ORDER BY count DESC 
+                 LIMIT 20",
+                '%' . $this->wpdb->esc_like($term) . '%'
+            );
+            $post_results = $this->wpdb->get_results($post_query, ARRAY_A);
+            
+            if ($post_results) {
+                foreach ($post_results as $row) {
+                    $key = $row['meta_key'];
+                    if (!isset($discovered['postmeta'][$key])) {
+                        $discovered['postmeta'][$key] = array(
+                            'meta_key' => $key,
+                            'count' => (int) $row['count'],
+                            'search_term' => $term
+                        );
+                    }
+                }
+            }
+        }
+        
+        return $discovered;
+    }
+    
+    /**
+     * Detect value format for a specific meta_key
+     * 
+     * @param string $meta_key Meta key to analyze
+     * @param string $table_type 'usermeta' or 'postmeta'
+     * @return array Value samples and format info
+     */
+    public function detect_value_format($meta_key, $table_type = 'usermeta') {
+        $table = ($table_type === 'postmeta') ? $this->wpdb->postmeta : $this->wpdb->usermeta;
+        $id_column = ($table_type === 'postmeta') ? 'post_id' : 'user_id';
+        
+        // Get value samples
+        $query = $this->wpdb->prepare(
+            "SELECT meta_value, COUNT(*) as count 
+             FROM {$table} 
+             WHERE meta_key = %s 
+             GROUP BY meta_value 
+             ORDER BY count DESC 
+             LIMIT 20",
+            $meta_key
+        );
+        $samples = $this->wpdb->get_results($query, ARRAY_A);
+        
+        $total_count = 0;
+        $non_empty_count = 0;
+        $value_formats = array();
+        
+        if ($samples) {
+            foreach ($samples as $sample) {
+                $value = $sample['meta_value'];
+                $count = (int) $sample['count'];
+                $total_count += $count;
+                
+                if (!empty($value)) {
+                    $non_empty_count += $count;
+                    $value_formats[] = array(
+                        'value' => $value,
+                        'count' => $count,
+                        'length' => strlen($value)
+                    );
+                }
+            }
+        }
+        
+        // Detect common patterns
+        $patterns = array();
+        if ($value_formats) {
+            $checked_values = array();
+            foreach ($value_formats as $vf) {
+                $val = strtolower(trim($vf['value']));
+                if (in_array($val, array('1', 'yes', 'true', 'checked', 'on', 'active'))) {
+                    $checked_values[] = $vf['value'];
+                }
+            }
+            if (!empty($checked_values)) {
+                $patterns['checkbox_checked'] = array_unique($checked_values);
+            }
+        }
+        
+        return array(
+            'meta_key' => $meta_key,
+            'table_type' => $table_type,
+            'value_samples' => $value_formats,
+            'total_rows' => $total_count,
+            'non_empty_rows' => $non_empty_count,
+            'patterns' => $patterns,
+            'unique_value_count' => count($value_formats)
+        );
+    }
+    
+    /**
+     * Extract search terms from user query
+     * 
+     * @param string $query User query text
+     * @return array Extracted search terms
+     */
+    public function extract_search_terms($query) {
+        // Convert to lowercase for matching
+        $lower_query = strtolower($query);
+        
+        $terms = array();
+        
+        // Common license-related terms
+        if (preg_match('/\b(iar|license|licence)\b/i', $query)) {
+            $terms[] = 'iar';
+            $terms[] = 'license';
+        }
+        
+        // Extract quoted terms
+        if (preg_match_all('/["\']([^"\']+)["\']/', $query, $matches)) {
+            foreach ($matches[1] as $match) {
+                $terms[] = strtolower($match);
+            }
+        }
+        
+        // Extract capitalized words (likely field names)
+        if (preg_match_all('/\b([A-Z][A-Z_]+)\b/', $query, $matches)) {
+            foreach ($matches[1] as $match) {
+                $terms[] = strtolower($match);
+            }
+        }
+        
+        // Extract common field name patterns
+        if (preg_match_all('/\b(\w+_license|\w+_iar|license_\w+|iar_\w+)\b/i', $query, $matches)) {
+            foreach ($matches[1] as $match) {
+                $terms[] = strtolower($match);
+            }
+        }
+        
+        // Remove duplicates and empty values
+        $terms = array_unique(array_filter($terms));
+        
+        // If no specific terms found, use keywords from query
+        if (empty($terms)) {
+            $keywords = explode(' ', $lower_query);
+            $keywords = array_filter($keywords, function($word) {
+                return strlen($word) > 3 && !in_array($word, array('the', 'and', 'for', 'with', 'that', 'this', 'have', 'users', 'user', 'show', 'get', 'list', 'find', 'where', 'email', 'name'));
+            });
+            $terms = array_slice($keywords, 0, 5);
+        }
+        
+        return array_values($terms);
+    }
 }
 
